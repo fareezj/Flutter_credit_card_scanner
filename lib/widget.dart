@@ -17,7 +17,8 @@ import 'process.dart';
 
 /// A widget that displays a live camera preview and scans for credit card information.
 ///
-/// This version allows you to pass in your own [CameraController] if desired.
+/// This version allows you to pass in your own [CameraController] if desired,
+/// and exposes the controller via [onControllerCreated].
 class CameraScannerWidget extends StatefulWidget {
   /// Callback function called when a credit card is successfully scanned.
   final void Function(BuildContext, CreditCardModel?) onScan;
@@ -31,6 +32,9 @@ class CameraScannerWidget extends StatefulWidget {
   /// Optional external camera controller.
   /// If provided, it will be used instead of creating a new one.
   final CameraController? externalController;
+
+  /// Callback to receive the initialized controller.
+  final void Function(CameraController controller)? onControllerCreated;
 
   /// Aspect ratio for the camera preview. If null, uses the device's screen aspect ratio.
   final double? aspectRatio;
@@ -68,6 +72,7 @@ class CameraScannerWidget extends StatefulWidget {
     required this.loadingHolder,
     required this.onNoCamera,
     this.externalController,
+    this.onControllerCreated,
     this.aspectRatio,
     this.cardNumber = true,
     this.cardHolder = true,
@@ -112,23 +117,9 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
     if (widget.externalController != null) {
       // Use external controller directly
       controller = widget.externalController;
-      if (controller!.value.isInitialized) {
-        valueLoading.value = false;
-        controller!.startImageStream((image) {
-          process(image, controller!.description);
-        });
-      } else {
-        // Listen for initialization if being set up upstream
-        controller!.initialize().then((_) {
-          if (!mounted) return;
-          valueLoading.value = false;
-          controller!.startImageStream((image) {
-            process(image, controller!.description);
-          });
-        }).catchError((_) {
-          widget.onNoCamera();
-        });
-      }
+      // Expose it immediately
+      widget.onControllerCreated?.call(controller!);
+      _startStreamWithController(controller!);
     } else {
       // Create our own controller
       availableCameras().then((cameras) async {
@@ -139,8 +130,27 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
         final back = cameras.firstWhere(
             (c) => c.lensDirection == CameraLensDirection.back,
             orElse: () => cameras.first);
-        _initializeInternalController(back);
+        await _initializeInternalController(back);
       }).onError((_, __) {
+        widget.onNoCamera();
+      });
+    }
+  }
+
+  Future<void> _startStreamWithController(CameraController ctrl) async {
+    if (ctrl.value.isInitialized) {
+      valueLoading.value = false;
+      await ctrl.startImageStream((image) {
+        process(image, ctrl.description);
+      });
+    } else {
+      ctrl.initialize().then((_) async {
+        if (!mounted) return;
+        valueLoading.value = false;
+        await ctrl.startImageStream((image) {
+          process(image, ctrl.description);
+        });
+      }).catchError((_) {
         widget.onNoCamera();
       });
     }
@@ -200,6 +210,8 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
     );
     controller = camController;
     await camController.initialize();
+    // Expose the new controller
+    widget.onControllerCreated?.call(camController);
     valueLoading.value = false;
     await camController.startImageStream((image) {
       process(image, description);
