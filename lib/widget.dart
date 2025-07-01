@@ -17,34 +17,7 @@ import 'process.dart';
 
 /// A widget that displays a live camera preview and scans for credit card information.
 ///
-/// This widget uses the device's camera to capture images and performs optical character
-/// recognition (OCR) to extract text from the images. It then analyzes the extracted
-/// text to identify credit card numbers, cardholder names, and expiry dates.
-///
-/// The widget provides callbacks for successful scans and errors, allowing developers
-/// to handle scanned credit card data and display appropriate UI feedback.
-///
-/// To use the widget, simply create an instance of [CameraScannerWidget] and provide
-/// the required callbacks:
-///
-/// ```dart
-/// CameraScannerWidget(
-///   onScan: (context, creditCardModel) {
-///     // Handle the scanned credit card data here
-///   },
-///   loadingHolder: Center(child: CircularProgressIndicator()),
-///   onNoCamera: () {
-///     // Handle the case where no camera is available
-///   },
-/// )
-/// ```
-///
-/// The [onScan] callback is triggered when a credit card is successfully scanned,
-/// providing a [CreditCardModel] object containing the extracted card information.
-///
-/// The [loadingHolder] widget is displayed while the camera is initializing.
-///
-/// The [onNoCamera] callback is triggered if no camera is available on the device.
+/// This version allows you to pass in your own [CameraController] if desired.
 class CameraScannerWidget extends StatefulWidget {
   /// Callback function called when a credit card is successfully scanned.
   final void Function(BuildContext, CreditCardModel?) onScan;
@@ -54,6 +27,10 @@ class CameraScannerWidget extends StatefulWidget {
 
   /// Callback function called when no camera is available on the device.
   final void Function() onNoCamera;
+
+  /// Optional external camera controller.
+  /// If provided, it will be used instead of creating a new one.
+  final CameraController? externalController;
 
   /// Aspect ratio for the camera preview. If null, uses the device's screen aspect ratio.
   final double? aspectRatio;
@@ -73,34 +50,24 @@ class CameraScannerWidget extends StatefulWidget {
   /// The shape of the border surrounding the credit card scanning area.
   final ShapeBorder? shapeBorder;
 
-  /// this will force validation of the card number means it will apply luhn algorithm to the card number
+  /// Force Luhn validation of the card number. Defaults to true.
   final bool useLuhnValidation;
 
+  /// Enable debug logging. Defaults to [kDebugMode].
   final bool debug;
 
-  /// the duration of the next frame
-  ///
-  /// this can be used to slow down the camera scanning and process the image
-  /// so it will scan and wait for the next frame to be processed based on the duration
-  ///
-  /// default is null which means the camera will scan as fast as possible
+  /// Duration to wait before processing the next frame.
   final Duration? durationOfNextFrame;
 
-  /// The resolution preset for the camera. Defaults to [ResolutionPreset.high].
-  ///
-  /// This can be used to set the resolution of the camera to a lower resolution to improve performance.
-  ///
-  /// depands on the targetted platfrom it can be ResolutionPreset.low, ResolutionPreset.medium, ResolutionPreset.high, ResolutionPreset.veryHigh, ResolutionPreset.ultraHigh, ResolutionPreset.max
+  /// Resolution preset for the camera.
   final ResolutionPreset? resolutionPreset;
 
-  /// Creates a [CameraScannerWidget].
-  ///
-  /// The [onScan], [loadingHolder], and [onNoCamera] parameters are required.
   const CameraScannerWidget({
     super.key,
     required this.onScan,
     required this.loadingHolder,
     required this.onNoCamera,
+    this.externalController,
     this.aspectRatio,
     this.cardNumber = true,
     this.cardHolder = true,
@@ -119,33 +86,70 @@ class CameraScannerWidget extends StatefulWidget {
 
 class _CameraScannerWidgetState extends State<CameraScannerWidget>
     with WidgetsBindingObserver {
-  final appleVisionController = apple.AppleVisionRecognizeTextController();
-
-  /// The camera controller used to manage the device's camera.
+  final apple.AppleVisionRecognizeTextController appleVisionController =
+      apple.AppleVisionRecognizeTextController();
   CameraController? controller;
-
-  /// Text recognizer used to process images and extract text.
-  final mlTextRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
-
-  /// Notifier to manage the loading state of the camera.
-  final valueLoading = ValueNotifier<bool>(true);
-
-  /// Flag to prevent multiple simultaneous scans.
+  final TextRecognizer mlTextRecognizer =
+      TextRecognizer(script: TextRecognitionScript.latin);
+  final ValueNotifier<bool> valueLoading = ValueNotifier<bool>(true);
   bool scanning = false;
 
-  late final _process = ProccessCreditCard(
-      useLuhnValidation: widget.useLuhnValidation,
-      checkCreditCardNumber: widget.cardNumber,
-      checkCreditCardName: widget.cardHolder,
-      checkCreditCardExpiryDate: widget.cardExpiryDate);
+  late final ProccessCreditCard _process = ProccessCreditCard(
+    useLuhnValidation: widget.useLuhnValidation,
+    checkCreditCardNumber: widget.cardNumber,
+    checkCreditCardName: widget.cardHolder,
+    checkCreditCardExpiryDate: widget.cardExpiryDate,
+  );
+
   Color get colorOverlay =>
       widget.colorOverlay ?? Colors.black.withOpacity(0.8);
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    if (widget.externalController != null) {
+      // Use external controller directly
+      controller = widget.externalController;
+      if (controller!.value.isInitialized) {
+        valueLoading.value = false;
+        controller!.startImageStream((image) {
+          process(image, controller!.description);
+        });
+      } else {
+        // Listen for initialization if being set up upstream
+        controller!.initialize().then((_) {
+          if (!mounted) return;
+          valueLoading.value = false;
+          controller!.startImageStream((image) {
+            process(image, controller!.description);
+          });
+        }).catchError((_) {
+          widget.onNoCamera();
+        });
+      }
+    } else {
+      // Create our own controller
+      availableCameras().then((cameras) async {
+        if (cameras.isEmpty) {
+          widget.onNoCamera();
+          return;
+        }
+        final back = cameras.firstWhere(
+            (c) => c.lensDirection == CameraLensDirection.back,
+            orElse: () => cameras.first);
+        _initializeInternalController(back);
+      }).onError((_, __) {
+        widget.onNoCamera();
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
-
-    return ValueListenableBuilder(
+    return ValueListenableBuilder<bool>(
       valueListenable: valueLoading,
       builder: (context, isLoading, _) {
         return AnimatedSwitcher(
@@ -154,27 +158,17 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
               ? widget.loadingHolder
               : Stack(
                   children: [
-                    // Camera
-                    // AspectRatio(
-                    //     aspectRatio: MediaQuery.of(context).size.aspectRatio,
-                    //     child: CameraPreview(controller!)),
-
-                    // Overlay
-                    Container(
-                      width: size.width,
-                      height: size.height,
-                      color: Colors.black,
-                    ),
+                    Container(color: Colors.black),
                     Center(child: CameraPreview(controller!)),
-
                     Container(
                       decoration: ShapeDecoration(
                         shape: widget.shapeBorder ??
                             OverlayShape(
-                                cutOutHeight: size.height * 0.3,
-                                cutOutWidth: size.width * 0.95,
-                                overlayColor: colorOverlay,
-                                borderRadius: 20),
+                              cutOutHeight: size.height * 0.3,
+                              cutOutWidth: size.width * 0.95,
+                              overlayColor: colorOverlay,
+                              borderRadius: 20,
+                            ),
                       ),
                     ),
                   ],
@@ -187,150 +181,69 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    if (controller != null) {
-      controller!.dispose();
+    if (widget.externalController == null) {
+      controller?.dispose();
     }
-
     mlTextRecognizer.close();
-
     super.dispose();
   }
 
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-
-    availableCameras().then((v) async {
-      if (v.isEmpty) {
-        if (mounted) {
-          widget.onNoCamera();
-        }
-        return;
-      }
-
-      final c = v.firstWhere(
-          (element) => element.lensDirection == CameraLensDirection.back);
-
-      _initializeCameraController(c);
-    }).onError((error, stackTrace) {
-      if (kDebugMode) {
-        log(error.toString());
-        log(stackTrace.toString());
-      }
-      if (mounted) {
-        widget.onNoCamera();
-      }
+  Future<void> _initializeInternalController(
+      CameraDescription description) async {
+    final camController = CameraController(
+      description,
+      widget.resolutionPreset ?? ResolutionPreset.high,
+      enableAudio: false,
+      imageFormatGroup: Platform.isAndroid
+          ? ImageFormatGroup.nv21
+          : ImageFormatGroup.bgra8888,
+    );
+    controller = camController;
+    await camController.initialize();
+    valueLoading.value = false;
+    await camController.startImageStream((image) {
+      process(image, description);
     });
-  }
-
-  void onScanApple(List<apple.RecognizedText> list) {
-    CreditCardModel? creditCardModel;
-
-    for (var item in list) {
-      for (var element in item.listText) {
-        _process.processNumber(element);
-        _process.processName(element);
-        _process.processDate(element);
-      }
-    }
-    creditCardModel = _process.getCreditCardModel();
-
-    if (creditCardModel != null) {
-      widget.onScan(context, creditCardModel);
-    }
-  }
-
-  /// Processes the recognized text to extract credit card information.
-  ///
-  /// This method analyzes the [RecognizedText] to identify the card number,
-  /// cardholder's name, and expiration date.
-  void onScanTextML(RecognizedText readText) {
-    // Call onScan callback if required information is found
-    CreditCardModel? creditCardModel;
-    for (TextBlock block in readText.blocks) {
-      for (TextLine line in block.lines) {
-        if (widget.debug) log(line.text);
-
-        _process.processNumber(line.text);
-
-        _process.processName(line.text);
-        _process.processDate(line.text);
-        // for (TextElement element in line.elements) {
-        //   final text = element.text;
-
-        // }
-      }
-
-      creditCardModel = _process.getCreditCardModel();
-    }
-
-    if (creditCardModel != null) {
-      if (widget.debug) {
-        log("Scanning catched card: " + creditCardModel.toString());
-      }
-      widget.onScan(context, creditCardModel);
-    }
   }
 
   void process(CameraImage image, CameraDescription description) async {
     if (scanning) return;
-
     scanning = true;
-
-    final InputImageRotation imageRotation =
+    final rotation =
         InputImageRotationValue.fromRawValue(description.sensorOrientation) ??
             InputImageRotation.rotation0deg;
-
-    final List<int> bytes =
-        image.planes.expand((plane) => plane.bytes).toList();
-
+    final bytes = image.planes.expand((p) => p.bytes).toList();
     try {
       if (Platform.isIOS) {
         final textR = await appleVisionController.processImage(
-            apple.RecognizeTextData(
-                automaticallyDetectsLanguage: false,
-                languages: [const Locale('en', 'US')],
-                recognitionLevel: apple.RecognitionLevel.accurate,
-                image: Uint8List.fromList(bytes),
-                orientation: imageRotation.appleRotation,
-                imageSize:
-                    Size(image.width.toDouble(), image.height.toDouble())));
-
-        if (textR?.isNotEmpty == true) {
-          onScanApple(textR!);
-        }
+          apple.RecognizeTextData(
+            automaticallyDetectsLanguage: false,
+            languages: [const Locale('en', 'US')],
+            recognitionLevel: apple.RecognitionLevel.accurate,
+            image: Uint8List.fromList(bytes),
+            orientation: rotation.appleRotation,
+            imageSize: Size(
+              image.width.toDouble(),
+              image.height.toDouble(),
+            ),
+          ),
+        );
+        if (textR?.isNotEmpty == true) onScanApple(textR!);
       } else {
-        final InputImage inputImage = InputImage.fromBytes(
+        final inputImage = InputImage.fromBytes(
           bytes: Uint8List.fromList(bytes),
           metadata: InputImageMetadata(
             size: Size(image.width.toDouble(), image.height.toDouble()),
-            rotation: imageRotation,
+            rotation: rotation,
             format: InputImageFormat.yv12,
             bytesPerRow: image.planes[0].bytesPerRow,
           ),
         );
-
         final textR = await mlTextRecognizer.processImage(inputImage);
-
-        if (textR.text.isNotEmpty) {
-          onScanTextML(textR);
-        }
+        if (textR.text.isNotEmpty) onScanTextML(textR);
       }
-
-      // scanning = false;
-
-      // Future.delayed(Duration(milliseconds: Platform.isAndroid ? 500 : 300),
-      //     () {
-      //   scanning = false;
-      // });
     } catch (e) {
-      // scanning = false;
-
-      // scanning = false;
-      if (kDebugMode) {
-        rethrow;
-      }
+      if (widget.debug) rethrow;
     } finally {
       if (widget.durationOfNextFrame != null) {
         Future.delayed(widget.durationOfNextFrame!, () {
@@ -342,30 +255,31 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
     }
   }
 
-  /// Initializes the camera controller and starts the image stream.
-  ///
-  /// This method sets up the camera with the given [description],
-  /// initializes the controller, and begins processing images for text recognition.
-  Future<void> _initializeCameraController(
-      CameraDescription description) async {
-    final CameraController cameraController = CameraController(
-      description,
-      widget.resolutionPreset ??
-          (Platform.isIOS ? ResolutionPreset.high : ResolutionPreset.high),
-      enableAudio: false,
-      imageFormatGroup: Platform.isAndroid
-          ? ImageFormatGroup.nv21
-          : ImageFormatGroup.bgra8888,
-    );
+  void onScanApple(List<apple.RecognizedText> list) {
+    for (var item in list) {
+      for (var element in item.listText) {
+        _process.processNumber(element);
+        _process.processName(element);
+        _process.processDate(element);
+      }
+    }
+    final model = _process.getCreditCardModel();
+    if (model != null) widget.onScan(context, model);
+  }
 
-    controller = cameraController;
-
-    await cameraController.initialize();
-
-    valueLoading.value = false;
-
-    await cameraController.startImageStream((CameraImage image) async {
-      process(image, description);
-    });
+  void onScanTextML(RecognizedText readText) {
+    for (final block in readText.blocks) {
+      for (final line in block.lines) {
+        if (widget.debug) log(line.text);
+        _process.processNumber(line.text);
+        _process.processName(line.text);
+        _process.processDate(line.text);
+      }
+    }
+    final model = _process.getCreditCardModel();
+    if (model != null) {
+      if (widget.debug) log('Scanned card: $model');
+      widget.onScan(context, model);
+    }
   }
 }
