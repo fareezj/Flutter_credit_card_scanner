@@ -305,7 +305,7 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
 
     for (final block in readText.blocks) {
       for (final line in block.lines) {
-        // normalize whitespace
+        // MEOW
         final raw = line.text;
         final text = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
 
