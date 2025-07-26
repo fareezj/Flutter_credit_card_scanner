@@ -273,18 +273,15 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
   void onScanApple(List<apple.RecognizedText> list) {
     final pattern = RegExp(r'\d{4} \d.*');
     int fallbackCount = 0;
+    CreditCardModel? creditCardModel;
 
     for (var item in list) {
       for (var element in item.listText) {
-        // normalize whitespace
-        final raw = line.text;
-        final text = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
-
-        // 1) FALLBACK processing always first
-        if (widget.debug) log(text);
-        _process.processNumber(text);
-        _process.processName(text);
-        _process.processDate(text);
+        final text = element.trim().replaceAll(RegExp(r'\s+'), ' ');
+          
+        _process.processNumber(element);
+        _process.processName(element);
+        _process.processDate(element);
 
         fallbackCount++;
 
@@ -295,8 +292,10 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
         }
       }
     }
-    final model = _process.getCreditCardModel();
-    if (model != null) widget.onScan(context, model);
+    creditCardModel = _process.getCreditCardModel();
+    if (creditCardModel != null) {
+      widget.onScan(context, creditCardModel);
+    }
   }
 
   void onScanTextML(RecognizedText readText) {
