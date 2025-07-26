@@ -23,6 +23,8 @@ class CameraScannerWidget extends StatefulWidget {
   /// Callback function called when a credit card is successfully scanned.
   final void Function(BuildContext, CreditCardModel?) onScan;
 
+  final void Function(String?) onReadCard;
+
   /// Widget to display while the camera is initializing.
   final Widget loadingHolder;
 
@@ -83,6 +85,7 @@ class CameraScannerWidget extends StatefulWidget {
     this.debug = kDebugMode,
     this.durationOfNextFrame,
     this.resolutionPreset,
+    required this.onReadCard,
   });
 
   @override
@@ -268,11 +271,28 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
   }
 
   void onScanApple(List<apple.RecognizedText> list) {
+    final pattern = RegExp(r'\d{4} \d.*');
+    int fallbackCount = 0;
+
     for (var item in list) {
       for (var element in item.listText) {
-        _process.processNumber(element);
-        _process.processName(element);
-        _process.processDate(element);
+        // normalize whitespace
+        final raw = line.text;
+        final text = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+        // 1) FALLBACK processing always first
+        if (widget.debug) log(text);
+        _process.processNumber(text);
+        _process.processName(text);
+        _process.processDate(text);
+
+        fallbackCount++;
+
+        // 2) only after TWO fallback runs do we also check for the “3423 2…” pattern
+        if (fallbackCount > 2 && pattern.hasMatch(text)) {
+          widget.onReadCard(text);
+          return; // stop scanning as soon as you get that match
+        }
       }
     }
     final model = _process.getCreditCardModel();
@@ -280,14 +300,32 @@ class _CameraScannerWidgetState extends State<CameraScannerWidget>
   }
 
   void onScanTextML(RecognizedText readText) {
+    final pattern = RegExp(r'\d{4} \d.*');
+    int fallbackCount = 0;
+
     for (final block in readText.blocks) {
       for (final line in block.lines) {
-        if (widget.debug) log(line.text);
-        _process.processNumber(line.text);
-        _process.processName(line.text);
-        _process.processDate(line.text);
+        // normalize whitespace
+        final raw = line.text;
+        final text = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+        // 1) FALLBACK processing always first
+        if (widget.debug) log(text);
+        _process.processNumber(text);
+        _process.processName(text);
+        _process.processDate(text);
+
+        fallbackCount++;
+
+        // 2) only after TWO fallback runs do we also check for the “3423 2…” pattern
+        if (fallbackCount > 2 && pattern.hasMatch(text)) {
+          widget.onReadCard(text);
+          return; // stop scanning as soon as you get that match
+        }
       }
     }
+
+    // 3) if no “3423 2…” hit, fall back to credit‑card model logic
     final model = _process.getCreditCardModel();
     if (model != null) {
       if (widget.debug) log('Scanned card: $model');
